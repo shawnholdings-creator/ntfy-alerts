@@ -9,8 +9,6 @@ import feedparser
 import requests
 
 # =========================
-# Config
-# =========================
 NTFY_TOPIC = "oilmacro"
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 STATE_FILE = Path("state.json")
@@ -20,6 +18,13 @@ SEARCH_QUERIES = [
     "Iran tanker sanctions oil",
     "Middle East oil shipping disruption",
     "OPEC oil supply Iran",
+]
+
+# --- Direct RSS feeds (free, no API key) ---
+DIRECT_RSS_FEEDS = [
+    "https://feeds.bbci.co.uk/news/world/rss.xml",        # BBC World
+    "https://feeds.bbci.co.uk/news/business/rss.xml",      # BBC Business
+    "https://www.aljazeera.com/xml/rss/all.xml",            # Al Jazeera All
 ]
 
 KEYWORDS = [
@@ -37,6 +42,8 @@ HIGH_PRIORITY = [
 PREFERRED_SOURCES = [
     "reuters.com","cnbc.com","bloomberg.com","ft.com",
     "wsj.com","apnews.com","barrons.com","fortune.com",
+    "bbc.com","bbc.co.uk",
+    "aljazeera.com",
 ]
 
 BLOCKED_SOURCES = [
@@ -49,8 +56,6 @@ REQUEST_TIMEOUT = 20
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # =========================
-# State
-# =========================
 def load_state() -> Dict[str, List[str]]:
     if not STATE_FILE.exists():
         return {"sent_links": [], "sent_titles": []}
@@ -59,14 +64,13 @@ def load_state() -> Dict[str, List[str]]:
         data.setdefault("sent_links", [])
         data.setdefault("sent_titles", [])
         return data
-    except:
+    except Exception as e:
+        logging.warning(f"Corrupted state.json, resetting: {e}")
         return {"sent_links": [], "sent_titles": []}
 
 def save_state(state):
     STATE_FILE.write_text(json.dumps(state, indent=2))
 
-# =========================
-# Helpers
 # =========================
 def rss_url(q):
     return f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-US&gl=US&ceid=US:en"
@@ -81,7 +85,7 @@ def normalize_title(t):
 def domain(link):
     try:
         return urlparse(link).netloc.replace("www.","")
-    except:
+    except Exception:
         return ""
 
 def score(text, dom):
@@ -95,33 +99,45 @@ def score(text, dom):
     return s
 
 # =========================
-# Fetch
-# =========================
 def fetch():
     out = []
+
+    # --- Google News RSS (aggregated search results) ---
     for q in SEARCH_QUERIES:
+        logging.info(f"Fetching Google News: {q}")
         feed = feedparser.parse(rss_url(q))
         for e in feed.entries:
-            title = e.get("title","")
-            link = e.get("link","")
-            text = title.lower()
-            dom = domain(link)
-            nt = normalize_title(title)
+            _process_entry(e, out)
 
-            if not link or not any(k in text for k in KEYWORDS):
-                continue
-            if any(b in dom for b in BLOCKED_SOURCES):
-                continue
-
-            out.append({
-                "title": title,
-                "nt": nt,
-                "link": link,
-                "dom": dom,
-                "score": score(text, dom)
-            })
+    # --- Direct RSS feeds (BBC, Al Jazeera) ---
+    for url in DIRECT_RSS_FEEDS:
+        logging.info(f"Fetching direct feed: {url}")
+        feed = feedparser.parse(url)
+        for e in feed.entries:
+            _process_entry(e, out)
 
     return dedupe(out)
+
+def _process_entry(e, out):
+    """Filter and score a single RSS entry, append to out if relevant."""
+    title = e.get("title","")
+    link = e.get("link","")
+    text = title.lower()
+    dom = domain(link)
+    nt = normalize_title(title)
+
+    if not link or not any(k in text for k in KEYWORDS):
+        return
+    if any(b in dom for b in BLOCKED_SOURCES):
+        return
+
+    out.append({
+        "title": title,
+        "nt": nt,
+        "link": link,
+        "dom": dom,
+        "score": score(text, dom)
+    })
 
 def dedupe(items):
     seen_t = set()
@@ -138,8 +154,6 @@ def dedupe(items):
     return res
 
 # =========================
-# Notify
-# =========================
 def send(i):
     body = f"{i['title']}\n{i['dom']}\n{i['link']}"
     headers = {
@@ -148,8 +162,6 @@ def send(i):
     }
     requests.post(NTFY_URL, data=body.encode(), headers=headers, timeout=REQUEST_TIMEOUT).raise_for_status()
 
-# =========================
-# Main
 # =========================
 def main():
     logging.info("=== Monitor start ===")
