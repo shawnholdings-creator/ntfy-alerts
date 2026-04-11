@@ -1,8 +1,9 @@
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 import feedparser
 import requests
@@ -22,197 +23,166 @@ SEARCH_QUERIES = [
 ]
 
 KEYWORDS = [
-    "iran",
-    "strait of hormuz",
-    "hormuz",
-    "oil",
-    "crude",
-    "brent",
-    "opec",
-    "tanker",
-    "shipping",
-    "sanctions",
-    "middle east",
-    "energy",
-    "xom",
-    "cvx",
-    "oxy",
-    "fang",
-    "slb",
-    "hal",
+    "iran","strait of hormuz","hormuz","oil","crude","brent","opec",
+    "tanker","shipping","sanctions","middle east","energy",
+    "xom","cvx","oxy","fang","slb","hal",
 ]
 
 HIGH_PRIORITY = [
-    "strait of hormuz",
-    "hormuz",
-    "iran",
-    "tanker",
-    "oil supply",
-    "shipping disruption",
-    "sanctions",
-    "missile",
-    "attack",
-    "closure",
-    "blockade",
+    "strait of hormuz","hormuz","iran","tanker","oil supply",
+    "shipping disruption","sanctions","missile","attack",
+    "closure","blockade",
 ]
 
-MAX_ALERTS_PER_RUN = 8
+PREFERRED_SOURCES = [
+    "reuters.com","cnbc.com","bloomberg.com","ft.com",
+    "wsj.com","apnews.com","barrons.com","fortune.com",
+]
+
+BLOCKED_SOURCES = [
+    "dailymail.co.uk","laodong.vn",
+]
+
+MAX_ALERTS_PER_RUN = 4
 REQUEST_TIMEOUT = 20
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # =========================
 # State
 # =========================
 def load_state() -> Dict[str, List[str]]:
     if not STATE_FILE.exists():
-        return {"sent_links": []}
+        return {"sent_links": [], "sent_titles": []}
     try:
-        data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            return {"sent_links": data}
-        if isinstance(data, dict) and "sent_links" in data:
-            return data
-    except Exception as exc:
-        logging.warning("Failed to read state.json: %s", exc)
-    return {"sent_links": []}
+        data = json.loads(STATE_FILE.read_text())
+        data.setdefault("sent_links", [])
+        data.setdefault("sent_titles", [])
+        return data
+    except:
+        return {"sent_links": [], "sent_titles": []}
 
-
-def save_state(state: Dict[str, List[str]]) -> None:
-    STATE_FILE.write_text(
-        json.dumps(state, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+def save_state(state):
+    STATE_FILE.write_text(json.dumps(state, indent=2))
 
 # =========================
-# Feed + filter
+# Helpers
 # =========================
-def google_news_rss_url(query: str) -> str:
-    return f"https://news.google.com/rss/search?q={quote_plus(query)}&hl=en-US&gl=US&ceid=US:en"
+def rss_url(q):
+    return f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-US&gl=US&ceid=US:en"
 
+def normalize_title(t):
+    t = t.lower()
+    t = re.sub(r"\s*-\s*[^-]+$", "", t)
+    t = re.sub(r"[^a-z0-9\s]", " ", t)
+    t = re.sub(r"\b(the|a|an|and|or|to|of|in|for|on|as|with)\b", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
 
-def normalize_text(*parts: str) -> str:
-    return " ".join((p or "").strip() for p in parts if p).lower()
+def domain(link):
+    try:
+        return urlparse(link).netloc.replace("www.","")
+    except:
+        return ""
 
-
-def matches_keywords(text: str) -> bool:
-    return any(k in text for k in KEYWORDS)
-
-
-def priority_score(text: str) -> int:
-    score = 0
-    for phrase in HIGH_PRIORITY:
-        if phrase in text:
-            score += 2
+def score(text, dom):
+    s = 0
+    for p in HIGH_PRIORITY:
+        if p in text: s += 2
     for k in KEYWORDS:
-        if k in text:
-            score += 1
-    return score
+        if k in text: s += 1
+    if any(p in dom for p in PREFERRED_SOURCES): s += 4
+    if any(b in dom for b in BLOCKED_SOURCES): s -= 5
+    return s
 
+# =========================
+# Fetch
+# =========================
+def fetch():
+    out = []
+    for q in SEARCH_QUERIES:
+        feed = feedparser.parse(rss_url(q))
+        for e in feed.entries:
+            title = e.get("title","")
+            link = e.get("link","")
+            text = title.lower()
+            dom = domain(link)
+            nt = normalize_title(title)
 
-def fetch_google_news() -> List[Dict[str, str]]:
-    items: List[Dict[str, str]] = []
-
-    for query in SEARCH_QUERIES:
-        url = google_news_rss_url(query)
-        parsed = feedparser.parse(url)
-
-        logging.info("RSS: %s items from %s", len(parsed.entries), url)
-
-        for entry in parsed.entries:
-            title = getattr(entry, "title", "") or ""
-            summary = getattr(entry, "summary", "") or ""
-            link = getattr(entry, "link", "") or ""
-
-            text = normalize_text(title, summary)
-
-            if not link or not matches_keywords(text):
+            if not link or not any(k in text for k in KEYWORDS):
+                continue
+            if any(b in dom for b in BLOCKED_SOURCES):
                 continue
 
-            items.append(
-                {
-                    "title": title.strip(),
-                    "link": link.strip(),
-                    "text": text,
-                    "score": priority_score(text),
-                }
-            )
+            out.append({
+                "title": title,
+                "nt": nt,
+                "link": link,
+                "dom": dom,
+                "score": score(text, dom)
+            })
 
-    return deduplicate_and_sort(items)
+    return dedupe(out)
 
+def dedupe(items):
+    seen_t = set()
+    seen_l = set()
+    res = []
 
-def deduplicate_and_sort(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    seen = set()
-    out: List[Dict[str, str]] = []
-
-    for item in items:
-        if item["link"] in seen:
+    for i in sorted(items, key=lambda x: x["score"], reverse=True):
+        if i["link"] in seen_l or i["nt"] in seen_t:
             continue
-        seen.add(item["link"])
-        out.append(item)
+        seen_l.add(i["link"])
+        seen_t.add(i["nt"])
+        res.append(i)
 
-    out.sort(key=lambda x: x["score"], reverse=True)
-    return out
+    return res
 
 # =========================
 # Notify
 # =========================
-def send_ntfy(item: Dict[str, str]) -> None:
-    body = f"{item['title']}\nScore: {item['score']}\n{item['link']}"
-
+def send(i):
+    body = f"{i['title']}\n{i['dom']}\n{i['link']}"
     headers = {
         "Title": "Oil Macro Alert",
-        "Priority": "high" if item["score"] >= 4 else "default",
-        "Tags": "oil,news",
+        "Priority": "high" if i["score"] >= 8 else "default",
     }
-
-    r = requests.post(
-        NTFY_URL,
-        data=body.encode("utf-8"),
-        headers=headers,
-        timeout=REQUEST_TIMEOUT,
-    )
-    r.raise_for_status()
+    requests.post(NTFY_URL, data=body.encode(), headers=headers, timeout=REQUEST_TIMEOUT).raise_for_status()
 
 # =========================
 # Main
 # =========================
 def main():
-    logging.info("=== Monitor starting ===")
+    logging.info("=== Monitor start ===")
 
     state = load_state()
-    sent_links = set(state.get("sent_links", []))
+    sent_l = set(state["sent_links"])
+    sent_t = set(state["sent_titles"])
 
-    candidates = fetch_google_news()
-    logging.info("News candidates: %s", len(candidates))
-
+    items = fetch()
     sent = 0
-    updated = list(sent_links)
 
-    for item in candidates:
-        if item["link"] in sent_links:
+    for i in items:
+        if i["link"] in sent_l or i["nt"] in sent_t:
             continue
 
         try:
-            send_ntfy(item)
-            updated.append(item["link"])
+            send(i)
+            sent_l.add(i["link"])
+            sent_t.add(i["nt"])
             sent += 1
-            logging.info("Sent alert: %s", item["title"])
+            logging.info(f"Sent: {i['title']}")
         except Exception as e:
-            logging.error("Send failed: %s", e)
+            logging.error(e)
 
         if sent >= MAX_ALERTS_PER_RUN:
             break
 
-    state["sent_links"] = updated[-1000:]
+    state["sent_links"] = list(sent_l)[-1000:]
+    state["sent_titles"] = list(sent_t)[-1000:]
     save_state(state)
 
-    logging.info("Sent alerts: %s", sent)
-    logging.info("=== Monitor done ===")
-
+    logging.info(f"Sent alerts: {sent}")
+    logging.info("=== Done ===")
 
 if __name__ == "__main__":
     main()
