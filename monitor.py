@@ -10,7 +10,7 @@ import requests
 # =========================
 # Config
 # =========================
-NTFY_TOPIC = "oilmacro-shawn-9f27x-alerts"
+NTFY_TOPIC = "oilmacro"
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 STATE_FILE = Path("state.json")
 
