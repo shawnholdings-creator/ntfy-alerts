@@ -155,10 +155,11 @@ def dedupe(items):
 
 # =========================
 def send(i):
-    body = f"{i['title']}\n{i['dom']}\n{i['link']}"
+    body = f"{i['title']}\n📰 {i['dom']}"
     headers = {
         "Title": "Oil Macro Alert",
         "Priority": "high" if i["score"] >= 8 else "default",
+        "Click": i["link"],
     }
     requests.post(NTFY_URL, data=body.encode(), headers=headers, timeout=REQUEST_TIMEOUT).raise_for_status()
 
