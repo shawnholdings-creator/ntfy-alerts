@@ -10,14 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GH_PAT }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,17 +24,21 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # --- RESTORE STATE FROM CACHE (replaces git commit strategy) ---
+      - name: Restore state cache
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: oil-state-${{ github.run_id }}
+          restore-keys: |
+            oil-state-
+
       - name: Run script
         run: python monitor.py
 
-      - name: Save state
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          cp state.json /tmp/state.json
-          git fetch origin main
-          git reset --hard origin/main
-          cp /tmp/state.json state.json
-          git add state.json
-          git diff --cached --quiet || git commit -m "chore: update state [skip ci]"
-          git push
+      # --- SAVE STATE TO CACHE (no more git push conflicts) ---
+      - name: Save state cache
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: oil-state-${{ github.run_id }}
